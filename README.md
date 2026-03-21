@@ -51,7 +51,7 @@ curl -X POST http://localhost:8081/api/v1/event-outcomes \
 
 ## Seed Data
 
-The matching service loads sample data from [`sql/data.sql`](/Users/lonebuddha/sporty-group/git/sporty-group/sql/data.sql) on startup.
+The matching service loads sample data from [`sql/data.sql`](sql/data.sql) on startup.
 
 - 100 bets are generated
 - 10 events are seeded: `EVT-0001` to `EVT-0010`
@@ -102,5 +102,5 @@ mqadmin topicRoute -n rocketmq-namesrv:9876 -t bet-settlements
 
 Both services write logs to the repo-level `logs/` directory:
 
-- [`logs/events-input-service.log`](/Users/lonebuddha/sporty-group/git/sporty-group/logs/events-input-service.log)
-- [`logs/events-bets-matching-service.log`](/Users/lonebuddha/sporty-group/git/sporty-group/logs/events-bets-matching-service.log)
+- [`logs/events-input-service.log`](logs/events-input-service.log)
+- [`logs/events-bets-matching-service.log`](logs/events-bets-matching-service.log)
