@@ -1,0 +1,57 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: events-bets-matching-service
+  datasource:
+    driver-class-name: org.h2.Driver
+    password:
+    url: jdbc:h2:mem:bets-db;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:kafka:9092}
+    consumer:
+      auto-offset-reset: earliest
+      group-id: events-bets-matching-service
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  sql:
+    init:
+      data-locations: ${APP_SQL_DATA:file:/app/sql/data.sql}
+      mode: always
+      schema-locations: ${APP_SQL_SCHEMA:file:/app/sql/schema.sql}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+app:
+  messaging:
+    bet-settlements-topic: ${BET_SETTLEMENTS_TOPIC:bet-settlements}
+    event-outcomes-topic: ${EVENT_OUTCOMES_TOPIC:event-outcomes}
+
+rocketmq:
+  name-server: ${ROCKETMQ_NAMESERVER:rocketmq-namesrv:9876}
+  producer:
+    group: ${ROCKETMQ_PRODUCER_GROUP:events-bets-matching-service}
+
+logging:
+  file:
+    name: /logs/events-bets-matching-service.log
+  level:
+    root: INFO
+    com.sportygroup.assignment: INFO
