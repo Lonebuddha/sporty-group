@@ -31,13 +31,13 @@ public class EventOutcomePublisher {
     public void publish(EventOutcomeMessage message) {
         try {
             String payload = objectMapper.writeValueAsString(message);
-            kafkaTemplate.send(eventOutcomesTopic, message.eventId(), payload).get(10, TimeUnit.SECONDS);
+            kafkaTemplate.send(eventOutcomesTopic, message.eventId(), payload).get(2, TimeUnit.SECONDS);
             log.info("Published event outcome for eventId={} to topic={}", message.eventId(), eventOutcomesTopic);
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("Failed to serialize event outcome message", exception);
         } catch (Exception exception) {
-            throw new IllegalStateException("Failed to publish event outcome to Kafka", exception);
+            log.error("Failed to publish event outcome for eventId={} to topic={}", message.eventId(), eventOutcomesTopic, exception);
+            throw new EventOutcomePublishException("Kafka is unavailable; event outcome was not published", exception);
         }
     }
 }
-

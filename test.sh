@@ -3,11 +3,45 @@ set -euo pipefail
 
 INPUT_SERVICE_URL="${INPUT_SERVICE_URL:-http://localhost:8081}"
 MATCHING_SERVICE_URL="${MATCHING_SERVICE_URL:-http://localhost:8082}"
-MATCHING_LOG_FILE="${MATCHING_LOG_FILE:-logs/events-bets-matching-service.log}"
 EVENT_ID="${EVENT_ID:-EVT-0001}"
-EVENT_NAME="${EVENT_NAME:-Championship Match EVT-0001}"
+DEFAULT_EVENT_NAME="Championship Match ${EVENT_ID} test-$(date -u +%Y%m%dT%H%M%S)"
+EVENT_NAME="${EVENT_NAME:-${DEFAULT_EVENT_NAME}}"
 EVENT_WINNER_ID="${EVENT_WINNER_ID:-TEAM-0001-A}"
-TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-60}"
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-30}"
+HTTP_MAX_TIME_SECONDS="${HTTP_MAX_TIME_SECONDS:-5}"
+ROCKETMQ_BROKER_CONTAINER="${ROCKETMQ_BROKER_CONTAINER:-sporty-group-rocketmq-broker}"
+ROCKETMQ_NAMESRV_ADDR="${ROCKETMQ_NAMESRV_ADDR:-rocketmq-namesrv:9876}"
+ROCKETMQ_TOPIC="${ROCKETMQ_TOPIC:-bet-settlements}"
+MQADMIN_COMMAND="${MQADMIN_COMMAND:-./mqadmin}"
+CONSUME_MESSAGE_COUNT="${CONSUME_MESSAGE_COUNT:-5000}"
+CONSUME_LOOKBACK_MILLISECONDS="${CONSUME_LOOKBACK_MILLISECONDS:-120000}"
+
+require_command() {
+  local command_name="$1"
+  if ! command -v "${command_name}" >/dev/null 2>&1; then
+    echo "Required command not found: ${command_name}" >&2
+    exit 1
+  fi
+}
+
+ensure_container_running() {
+  local container_name="$1"
+  local is_running
+
+  is_running=$(docker inspect -f '{{.State.Running}}' "${container_name}" 2>/dev/null || true)
+  if [[ "${is_running}" != "true" ]]; then
+    echo "Required Docker container is not running: ${container_name}" >&2
+    exit 1
+  fi
+}
+
+docker_exec_broker() {
+  if [[ -t 0 && -t 1 ]]; then
+    docker exec -it "$@"
+  else
+    docker exec -i "$@"
+  fi
+}
 
 wait_for_health() {
   local service_name="$1"
@@ -16,7 +50,7 @@ wait_for_health() {
 
   while (( SECONDS < deadline )); do
     local status
-    status=$(curl -fsS "${service_url}/actuator/health" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' 2>/dev/null || true)
+    status=$(curl --max-time "${HTTP_MAX_TIME_SECONDS}" -fsS "${service_url}/actuator/health" 2>/dev/null | jq -r '.status' 2>/dev/null || true)
     if [[ "${status}" == "UP" ]]; then
       return 0
     fi
@@ -28,53 +62,130 @@ wait_for_health() {
 }
 
 json_count() {
-  python3 -c 'import json,sys; print(len(json.load(sys.stdin)))'
+  jq 'length'
 }
 
 json_count_matching_winner() {
   local winner_id="$1"
-  python3 -c 'import json,sys; winner_id=sys.argv[1]; data=json.load(sys.stdin); print(sum(1 for item in data if item["eventWinnerId"] == winner_id))' "${winner_id}"
+  jq --arg winner_id "${winner_id}" '[.[] | select(.eventWinnerId == $winner_id)] | length'
 }
 
 json_equal() {
   local left_json="$1"
   local right_json="$2"
-  python3 -c 'import json,sys; print("true" if json.loads(sys.argv[1]) == json.loads(sys.argv[2]) else "false")' "${left_json}" "${right_json}"
+  if [[ "$(printf '%s' "${left_json}" | jq -S -c .)" == "$(printf '%s' "${right_json}" | jq -S -c .)" ]]; then
+    echo "true"
+  else
+    echo "false"
+  fi
 }
 
-log_count_published_messages() {
-  local event_id="$1"
-  local outcome="${2:-}"
-  python3 - "${MATCHING_LOG_FILE}" "${event_id}" "${outcome}" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-event_id = sys.argv[2]
-outcome = sys.argv[3]
-
-if not path.exists():
-    print(0)
-    raise SystemExit
-
-needle = f"Published settlement message for eventId={event_id}"
-count = 0
-with path.open() as handle:
-    for line in handle:
-        if needle not in line:
-            continue
-        if outcome and f" outcome={outcome}" not in line:
-            continue
-        count += 1
-
-print(count)
-PY
+consume_settlement_bodies() {
+  local begin_timestamp="$1"
+  local end_timestamp="$2"
+  local message_count="$3"
+  docker_exec_broker \
+    -e CONSUME_BEGIN_TIMESTAMP="${begin_timestamp}" \
+    -e CONSUME_END_TIMESTAMP="${end_timestamp}" \
+    -e CONSUME_MESSAGE_COUNT="${message_count}" \
+    -e MQADMIN_COMMAND="${MQADMIN_COMMAND}" \
+    -e ROCKETMQ_NAMESRV_ADDR="${ROCKETMQ_NAMESRV_ADDR}" \
+    -e ROCKETMQ_TOPIC="${ROCKETMQ_TOPIC}" \
+    "${ROCKETMQ_BROKER_CONTAINER}" \
+    sh -lc '
+      cd /home/rocketmq/rocketmq-5.3.2/bin &&
+      "$MQADMIN_COMMAND" consumeMessage \
+        -n "$ROCKETMQ_NAMESRV_ADDR" \
+        -t "$ROCKETMQ_TOPIC" \
+        -s "$CONSUME_BEGIN_TIMESTAMP" \
+        -e "$CONSUME_END_TIMESTAMP" \
+        -c "$CONSUME_MESSAGE_COUNT"
+    ' 2>/dev/null | tr -d '\r' | sed -n 's/^.* BODY: //p'
 }
+
+build_expected_settlements_json() {
+  local bets_json="$1"
+  printf '%s' "${bets_json}" | jq \
+    --arg event_name "${EVENT_NAME}" \
+    --arg actual_winner_id "${EVENT_WINNER_ID}" \
+    '
+      map({
+        betId,
+        userId,
+        eventId,
+        eventName: $event_name,
+        eventMarketId,
+        selectedWinnerId: .eventWinnerId,
+        actualWinnerId: $actual_winner_id,
+        settlementOutcome: (
+          if .eventWinnerId == $actual_winner_id
+          then "WON"
+          else "LOST"
+          end
+        ),
+        betAmount
+      })
+      | sort_by(.betId)
+    '
+}
+
+normalize_consumed_settlements_json() {
+  jq -s \
+    --arg event_id "${EVENT_ID}" \
+    --arg event_name "${EVENT_NAME}" \
+    --arg actual_winner_id "${EVENT_WINNER_ID}" \
+    '
+      map(
+        select(
+          .eventId == $event_id
+          and .eventName == $event_name
+          and .actualWinnerId == $actual_winner_id
+        )
+        | {
+            betId,
+            userId,
+            eventId,
+            eventName,
+            eventMarketId,
+            selectedWinnerId,
+            actualWinnerId,
+            settlementOutcome,
+            betAmount
+          }
+      )
+      | sort_by(.betId)
+    '
+}
+
+count_settled_at_values() {
+  jq -s \
+    --arg event_id "${EVENT_ID}" \
+    --arg event_name "${EVENT_NAME}" \
+    --arg actual_winner_id "${EVENT_WINNER_ID}" \
+    '
+      [
+        .[]
+        | select(
+            .eventId == $event_id
+            and .eventName == $event_name
+            and .actualWinnerId == $actual_winner_id
+            and (.settledAt // "") != ""
+          )
+      ]
+      | length
+    '
+}
+
+require_command curl
+require_command docker
+require_command jq
+ensure_container_running "${ROCKETMQ_BROKER_CONTAINER}"
 
 wait_for_health "events-input-service" "${INPUT_SERVICE_URL}"
 wait_for_health "events-bets-matching-service" "${MATCHING_SERVICE_URL}"
 
-initial_bets_json=$(curl -fsS "${MATCHING_SERVICE_URL}/api/v1/bets?eventId=${EVENT_ID}")
+initial_bets_json=$(curl --max-time "${HTTP_MAX_TIME_SECONDS}" -fsS "${MATCHING_SERVICE_URL}/api/v1/bets?eventId=${EVENT_ID}")
+expected_settlements_json=$(build_expected_settlements_json "${initial_bets_json}")
 expected_total=$(printf '%s' "${initial_bets_json}" | json_count)
 expected_won=$(printf '%s' "${initial_bets_json}" | json_count_matching_winner "${EVENT_WINNER_ID}")
 expected_lost=$((expected_total - expected_won))
@@ -85,35 +196,80 @@ if [[ "${expected_total}" -eq 0 ]]; then
 fi
 
 echo "Sending event outcome for ${EVENT_ID} with winner ${EVENT_WINNER_ID}"
-baseline_total=$(log_count_published_messages "${EVENT_ID}")
-baseline_won=$(log_count_published_messages "${EVENT_ID}" "WON")
-baseline_lost=$(log_count_published_messages "${EVENT_ID}" "LOST")
+post_response_file=$(mktemp)
+post_status_code=""
+consume_begin_timestamp=$(( $(date +%s) * 1000 - CONSUME_LOOKBACK_MILLISECONDS ))
 
-curl -fsS -X POST "${INPUT_SERVICE_URL}/api/v1/event-outcomes" \
+cleanup() {
+  rm -f "${post_response_file}"
+}
+
+trap cleanup EXIT
+
+if ! post_status_code=$(curl \
+  --http1.1 \
+  --max-time "${HTTP_MAX_TIME_SECONDS}" \
+  --silent \
+  --show-error \
+  --output "${post_response_file}" \
+  --write-out '%{http_code}' \
+  -X POST "${INPUT_SERVICE_URL}/api/v1/event-outcomes" \
+  -H 'Connection: close' \
   -H 'Content-Type: application/json' \
   -d "{
     \"eventId\": \"${EVENT_ID}\",
     \"eventName\": \"${EVENT_NAME}\",
     \"eventWinnerId\": \"${EVENT_WINNER_ID}\"
-  }" >/dev/null
+  }"); then
+  echo "Failed to call events-input-service POST /api/v1/event-outcomes" >&2
+  exit 1
+fi
+
+if [[ "${post_status_code}" != "202" ]]; then
+  echo "Expected HTTP 202 from events-input-service, got ${post_status_code}" >&2
+  if [[ -s "${post_response_file}" ]]; then
+    echo "Response body:" >&2
+    cat "${post_response_file}" >&2
+  fi
+  exit 1
+fi
 
 deadline=$((SECONDS + TIMEOUT_SECONDS))
 actual_total=0
 actual_won=0
 actual_lost=0
+actual_settlements_json='[]'
+actual_settled_at_count=0
+actual_bet_ids=''
 
 while (( SECONDS < deadline )); do
-  actual_total=$(( $(log_count_published_messages "${EVENT_ID}") - baseline_total ))
-  actual_won=$(( $(log_count_published_messages "${EVENT_ID}" "WON") - baseline_won ))
-  actual_lost=$(( $(log_count_published_messages "${EVENT_ID}" "LOST") - baseline_lost ))
-  if [[ "${actual_total}" -eq "${expected_total}" && "${actual_won}" -eq "${expected_won}" && "${actual_lost}" -eq "${expected_lost}" ]]; then
+  consume_end_timestamp=$(( $(date +%s) * 1000 ))
+  consumed_bodies=$(consume_settlement_bodies "${consume_begin_timestamp}" "${consume_end_timestamp}" "${CONSUME_MESSAGE_COUNT}" || true)
+  if [[ -n "${consumed_bodies}" ]]; then
+    actual_settlements_json=$(printf '%s\n' "${consumed_bodies}" | normalize_consumed_settlements_json)
+    actual_settled_at_count=$(printf '%s\n' "${consumed_bodies}" | count_settled_at_values)
+  else
+    actual_settlements_json='[]'
+    actual_settled_at_count=0
+  fi
+  actual_total=$(printf '%s' "${actual_settlements_json}" | jq 'length')
+  actual_won=$(printf '%s' "${actual_settlements_json}" | jq '[.[] | select(.settlementOutcome == "WON")] | length')
+  actual_lost=$(printf '%s' "${actual_settlements_json}" | jq '[.[] | select(.settlementOutcome == "LOST")] | length')
+  actual_bet_ids=$(printf '%s' "${actual_settlements_json}" | jq -r 'map(.betId) | sort | join(",")')
+  if [[ \
+    "${actual_total}" -eq "${expected_total}" && \
+    "${actual_won}" -eq "${expected_won}" && \
+    "${actual_lost}" -eq "${expected_lost}" && \
+    "$(json_equal "${expected_settlements_json}" "${actual_settlements_json}")" == "true" && \
+    "${actual_settled_at_count}" -eq "${expected_total}" \
+  ]]; then
     break
   fi
   sleep 2
 done
 
 if [[ "${actual_total}" -ne "${expected_total}" ]]; then
-  echo "Expected ${expected_total} settlements for ${EVENT_ID}, found ${actual_total}" >&2
+  echo "Expected ${expected_total} settlements for ${EVENT_ID}, found ${actual_total}. Consumed betIds=[${actual_bet_ids}]" >&2
   exit 1
 fi
 
@@ -127,7 +283,17 @@ if [[ "${actual_lost}" -ne "${expected_lost}" ]]; then
   exit 1
 fi
 
-updated_bets_json=$(curl -fsS "${MATCHING_SERVICE_URL}/api/v1/bets?eventId=${EVENT_ID}")
+if [[ "$(json_equal "${expected_settlements_json}" "${actual_settlements_json}")" != "true" ]]; then
+  echo "Consumed settlement messages do not match the expected payloads for ${EVENT_ID}" >&2
+  exit 1
+fi
+
+if [[ "${actual_settled_at_count}" -ne "${expected_total}" ]]; then
+  echo "Expected ${expected_total} settlement messages with settledAt, found ${actual_settled_at_count}" >&2
+  exit 1
+fi
+
+updated_bets_json=$(curl --max-time "${HTTP_MAX_TIME_SECONDS}" -fsS "${MATCHING_SERVICE_URL}/api/v1/bets?eventId=${EVENT_ID}")
 
 if [[ "$(json_equal "${initial_bets_json}" "${updated_bets_json}")" != "true" ]]; then
   echo "Expected bets database to remain unchanged after processing ${EVENT_ID}" >&2
