@@ -3,7 +3,7 @@
 This repository contains a runnable Docker Compose setup for the backend home assignment. It includes:
 
 - `events-input-service`: a Spring Boot API that accepts sports event outcomes over HTTP and publishes them to Kafka topic `event-outcomes` using virtual threads for request handling.
-- `events-bets-matching-service`: a Spring Boot service that owns an in-memory H2 bets database, consumes `event-outcomes`, matches unsettled bets for the event, and publishes settlement messages to RocketMQ topic `bet-settlements`.
+- `events-bets-matching-service`: a Spring Boot service that owns an in-memory H2 bets database, consumes `event-outcomes`, matches bets for the event, and publishes settlement messages to RocketMQ topic `bet-settlements` without mutating the database.
 
 ## Requirements Coverage
 
@@ -58,7 +58,7 @@ The matching service loads sample data from [`sql/data.sql`](sql/data.sql) on st
 - Each event has 10 bets
 - For each event, 5 bets back `TEAM-xxxx-A` and 5 bets back `TEAM-xxxx-B`
 
-Example: for `EVT-0001`, sending winner `TEAM-0001-A` should produce 10 settlements in total: 5 `WON` and 5 `LOST`.
+Example: for `EVT-0001`, sending winner `TEAM-0001-A` should publish 10 settlement messages in total: 5 `WON` and 5 `LOST`.
 
 ## Verify Matching And Settlements
 
@@ -73,14 +73,13 @@ The script:
 - waits for both services to become healthy
 - reads seeded bets for `EVT-0001`
 - sends an event outcome to `events-input-service`
-- polls `events-bets-matching-service`
-- asserts that all matching bets are settled and that the `WON` / `LOST` counts are correct
+- polls the matching-service log file for published settlement messages
+- asserts that the `WON` / `LOST` counts are correct and that the bets database remains unchanged
 
 You can also inspect the matching service directly:
 
 ```bash
 curl "http://localhost:8082/api/v1/bets?eventId=EVT-0001"
-curl "http://localhost:8082/api/v1/settlements?eventId=EVT-0001"
 ```
 
 ## Inspect RocketMQ Messages

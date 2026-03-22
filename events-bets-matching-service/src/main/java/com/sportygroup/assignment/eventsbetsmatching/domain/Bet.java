@@ -5,7 +5,6 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
-import java.time.Instant;
 
 @Entity
 @Table(name = "bets")
@@ -29,18 +28,6 @@ public class Bet {
 
     @Column(name = "bet_amount", nullable = false, precision = 10, scale = 2)
     private BigDecimal betAmount;
-
-    @Column(name = "settled", nullable = false)
-    private boolean settled;
-
-    @Column(name = "settlement_status", length = 16)
-    private String settlementStatus;
-
-    @Column(name = "settled_at")
-    private Instant settledAt;
-
-    @Column(name = "settlement_message_id", length = 64)
-    private String settlementMessageId;
 
     protected Bet() {
     }
@@ -68,28 +55,4 @@ public class Bet {
     public BigDecimal getBetAmount() {
         return betAmount;
     }
-
-    public boolean isSettled() {
-        return settled;
-    }
-
-    public String getSettlementStatus() {
-        return settlementStatus;
-    }
-
-    public Instant getSettledAt() {
-        return settledAt;
-    }
-
-    public String getSettlementMessageId() {
-        return settlementMessageId;
-    }
-
-    public void markSettled(SettlementOutcome settlementOutcome, Instant settledTimestamp, String messageId) {
-        this.settled = true;
-        this.settlementStatus = settlementOutcome.name();
-        this.settledAt = settledTimestamp;
-        this.settlementMessageId = messageId;
-    }
 }
-

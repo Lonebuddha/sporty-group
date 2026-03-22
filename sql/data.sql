@@ -4,11 +4,7 @@ INSERT INTO bets (
     event_id,
     event_market_id,
     event_winner_id,
-    bet_amount,
-    settled,
-    settlement_status,
-    settled_at,
-    settlement_message_id
+    bet_amount
 )
 SELECT
     generated.sequence_id,
@@ -20,11 +16,7 @@ SELECT
             THEN 'TEAM-' || RIGHT('0000' || CAST(generated.event_number AS VARCHAR), 4) || '-A'
         ELSE 'TEAM-' || RIGHT('0000' || CAST(generated.event_number AS VARCHAR), 4) || '-B'
     END,
-    CAST(25 + (generated.event_bet_index * 5) AS DECIMAL(10, 2)),
-    FALSE,
-    NULL,
-    NULL,
-    NULL
+    CAST(25 + (generated.event_bet_index * 5) AS DECIMAL(10, 2))
 FROM (
     SELECT
         x AS sequence_id,
@@ -32,4 +24,3 @@ FROM (
         MOD(x - 1, 10) AS event_bet_index
     FROM SYSTEM_RANGE(1, 100)
 ) generated;
-

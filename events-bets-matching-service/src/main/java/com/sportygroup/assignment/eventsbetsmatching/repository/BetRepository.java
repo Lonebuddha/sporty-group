@@ -6,8 +6,5 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface BetRepository extends JpaRepository<Bet, Long> {
 
-    List<Bet> findByEventIdAndSettledFalseOrderByBetId(String eventId);
-
     List<Bet> findByEventIdOrderByBetId(String eventId);
 }
-

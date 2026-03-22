@@ -3,6 +3,7 @@ set -euo pipefail
 
 INPUT_SERVICE_URL="${INPUT_SERVICE_URL:-http://localhost:8081}"
 MATCHING_SERVICE_URL="${MATCHING_SERVICE_URL:-http://localhost:8082}"
+MATCHING_LOG_FILE="${MATCHING_LOG_FILE:-logs/events-bets-matching-service.log}"
 EVENT_ID="${EVENT_ID:-EVT-0001}"
 EVENT_NAME="${EVENT_NAME:-Championship Match EVT-0001}"
 EVENT_WINNER_ID="${EVENT_WINNER_ID:-TEAM-0001-A}"
@@ -35,13 +36,39 @@ json_count_matching_winner() {
   python3 -c 'import json,sys; winner_id=sys.argv[1]; data=json.load(sys.stdin); print(sum(1 for item in data if item["eventWinnerId"] == winner_id))' "${winner_id}"
 }
 
-json_count_outcome() {
-  local outcome="$1"
-  python3 -c 'import json,sys; outcome=sys.argv[1]; data=json.load(sys.stdin); print(sum(1 for item in data if item["settlementOutcome"] == outcome))' "${outcome}"
+json_equal() {
+  local left_json="$1"
+  local right_json="$2"
+  python3 -c 'import json,sys; print("true" if json.loads(sys.argv[1]) == json.loads(sys.argv[2]) else "false")' "${left_json}" "${right_json}"
 }
 
-json_count_settled_bets() {
-  python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(1 for item in data if item["settled"]))'
+log_count_published_messages() {
+  local event_id="$1"
+  local outcome="${2:-}"
+  python3 - "${MATCHING_LOG_FILE}" "${event_id}" "${outcome}" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+event_id = sys.argv[2]
+outcome = sys.argv[3]
+
+if not path.exists():
+    print(0)
+    raise SystemExit
+
+needle = f"Published settlement message for eventId={event_id}"
+count = 0
+with path.open() as handle:
+    for line in handle:
+        if needle not in line:
+            continue
+        if outcome and f" outcome={outcome}" not in line:
+            continue
+        count += 1
+
+print(count)
+PY
 }
 
 wait_for_health "events-input-service" "${INPUT_SERVICE_URL}"
@@ -58,6 +85,10 @@ if [[ "${expected_total}" -eq 0 ]]; then
 fi
 
 echo "Sending event outcome for ${EVENT_ID} with winner ${EVENT_WINNER_ID}"
+baseline_total=$(log_count_published_messages "${EVENT_ID}")
+baseline_won=$(log_count_published_messages "${EVENT_ID}" "WON")
+baseline_lost=$(log_count_published_messages "${EVENT_ID}" "LOST")
+
 curl -fsS -X POST "${INPUT_SERVICE_URL}/api/v1/event-outcomes" \
   -H 'Content-Type: application/json' \
   -d "{
@@ -68,12 +99,14 @@ curl -fsS -X POST "${INPUT_SERVICE_URL}/api/v1/event-outcomes" \
 
 deadline=$((SECONDS + TIMEOUT_SECONDS))
 actual_total=0
-settlements_json='[]'
+actual_won=0
+actual_lost=0
 
 while (( SECONDS < deadline )); do
-  settlements_json=$(curl -fsS "${MATCHING_SERVICE_URL}/api/v1/settlements?eventId=${EVENT_ID}")
-  actual_total=$(printf '%s' "${settlements_json}" | json_count)
-  if [[ "${actual_total}" -eq "${expected_total}" ]]; then
+  actual_total=$(( $(log_count_published_messages "${EVENT_ID}") - baseline_total ))
+  actual_won=$(( $(log_count_published_messages "${EVENT_ID}" "WON") - baseline_won ))
+  actual_lost=$(( $(log_count_published_messages "${EVENT_ID}" "LOST") - baseline_lost ))
+  if [[ "${actual_total}" -eq "${expected_total}" && "${actual_won}" -eq "${expected_won}" && "${actual_lost}" -eq "${expected_lost}" ]]; then
     break
   fi
   sleep 2
@@ -84,25 +117,21 @@ if [[ "${actual_total}" -ne "${expected_total}" ]]; then
   exit 1
 fi
 
-actual_won=$(printf '%s' "${settlements_json}" | json_count_outcome "WON")
-actual_lost=$(printf '%s' "${settlements_json}" | json_count_outcome "LOST")
-
 if [[ "${actual_won}" -ne "${expected_won}" ]]; then
-  echo "Expected ${expected_won} WON settlements, found ${actual_won}" >&2
+  echo "Expected ${expected_won} WON settlement messages, found ${actual_won}" >&2
   exit 1
 fi
 
 if [[ "${actual_lost}" -ne "${expected_lost}" ]]; then
-  echo "Expected ${expected_lost} LOST settlements, found ${actual_lost}" >&2
+  echo "Expected ${expected_lost} LOST settlement messages, found ${actual_lost}" >&2
   exit 1
 fi
 
 updated_bets_json=$(curl -fsS "${MATCHING_SERVICE_URL}/api/v1/bets?eventId=${EVENT_ID}")
-settled_bets=$(printf '%s' "${updated_bets_json}" | json_count_settled_bets)
 
-if [[ "${settled_bets}" -ne "${expected_total}" ]]; then
-  echo "Expected ${expected_total} bets to be marked as settled, found ${settled_bets}" >&2
+if [[ "$(json_equal "${initial_bets_json}" "${updated_bets_json}")" != "true" ]]; then
+  echo "Expected bets database to remain unchanged after processing ${EVENT_ID}" >&2
   exit 1
 fi
 
-echo "Test passed for ${EVENT_ID}: ${actual_total} settlements created (${actual_won} WON, ${actual_lost} LOST)."
+echo "Test passed for ${EVENT_ID}: ${actual_total} settlement messages published (${actual_won} WON, ${actual_lost} LOST) and bets DB stayed unchanged."

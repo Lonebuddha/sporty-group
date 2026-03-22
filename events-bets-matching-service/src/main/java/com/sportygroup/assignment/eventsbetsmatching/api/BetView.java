@@ -8,9 +8,6 @@ public record BetView(
     String eventId,
     String eventMarketId,
     String eventWinnerId,
-    BigDecimal betAmount,
-    boolean settled,
-    String settlementStatus
+    BigDecimal betAmount
 ) {
 }
-
