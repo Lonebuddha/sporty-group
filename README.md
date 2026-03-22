@@ -22,7 +22,7 @@ I am a happy owner of MacBook Air M2, and I realized that RocketMQ is very sensi
 Requirements on the host:
 
 - `curl`
-- `docker`
+- `docker` (more than 4Gb of memory please)
 - `jq`
 
 ## Run
