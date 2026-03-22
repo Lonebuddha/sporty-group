@@ -106,8 +106,8 @@ Then run:
 
 ```bash
 cd /home/rocketmq/rocketmq-5.3.2/bin
-mqadmin clusterList -n rocketmq-namesrv:9876
-mqadmin topicRoute -n rocketmq-namesrv:9876 -t bet-settlements
+./mqadmin clusterList -n rocketmq-namesrv:9876
+./mqadmin topicRoute -n rocketmq-namesrv:9876 -t bet-settlements
 ./mqadmin consumeMessage -n rocketmq-namesrv:9876 -t bet-settlements -s "$(($(date +%s) * 1000 - 120000))" -e "$(($(date +%s) * 1000))" -c 5000
 ```
 
